@@ -1,0 +1,305 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>聚会地点计算器</title>
+    <style>
+        #map-container {
+            height: 70vh;
+            width: 100%;
+            position: relative;
+        }
+        .control-panel {
+            padding: 1rem;
+            background: #f5f5f5;
+            border-bottom: 1px solid #ddd;
+        }
+        .status-info {
+            padding: 1rem;
+            font-size: 1.2em;
+        }
+        button {
+            padding: 8px 15px;
+            background: #2196F3;
+            color: white;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            margin-right: 10px;
+        }
+        .recommendation {
+            background: #4CAF50;
+        }
+        .distance-label {
+            background: white;
+            padding: 3px 8px;
+            border-radius: 3px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+            font-size: 12px;
+            border: 1px solid #ddd;
+        }
+        .distance-line {
+            stroke: #FF9800;
+            stroke-width: 2;
+            stroke-dasharray: 5 5;
+        }
+    </style>
+</head>
+<body>
+    <div id="app">
+        <div class="control-panel">
+            <button @click="clearAll">清空所有地点</button>
+            <span class="status-info" v-if="points.length > 0">
+                已标记 {{ points.length }} 个地点 | 
+                平均距离：{{ avgDistance ? avgDistance.toFixed(2) + '米' : '计算中...' }}
+            </span>
+        </div>
+        <div id="map-container"></div>
+        <div class="status-info" v-if="recommendation">
+            <button class="recommendation" @click="centerOnRecommendation">
+                推荐点：经度 {{ recommendation.lng.toFixed(6) }}, 纬度 {{ recommendation.lat.toFixed(6) }}
+            </button>
+        </div>
+    </div>
+
+    <script type="text/javascript" src="https://api.map.baidu.com/api?v=1.0&type=webgl&ak=v2g20eyi8dEtJxLQt8vPWP7aK64aPMzT"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.js"></script>
+
+    <script>
+        const { createApp } = Vue;
+
+        createApp({
+            data() {
+                return {
+                    map: null,
+                    points: [],
+                    markers: [],
+                    recommendation: null,
+                    avgDistance: null,
+                    distanceHelpers: [] // 存储辅助线和标签
+                }
+            },
+            mounted() {
+                this.initMap();
+            },
+            methods: {
+                initMap() {
+                    this.map = new BMapGL.Map('map-container');
+                    this.map.centerAndZoom(new BMapGL.Point(116.404, 39.915), 13);
+                    this.map.enableScrollWheelZoom(true);
+                    
+                    this.map.addEventListener('click', (e) => {
+                        this.addPoint(e.latlng.lng, e.latlng.lat);
+                    });
+                },
+
+                addPoint(lng, lat) {
+                    const point = new BMapGL.Point(lng, lat);
+                    const marker = new BMapGL.Marker(point);
+                    
+                    const label = new BMapGL.Label(`
+                        <div style="
+                            background: white;
+                            padding: 3px 8px;
+                            border-radius: 3px;
+                            box-shadow: 0 1px 3px rgba(0,0,0,0.3);
+                        ">
+                            ${this.points.length + 1}
+                            <span style="
+                                color: red;
+                                margin-left: 5px;
+                                cursor: pointer;
+                                font-weight: bold;
+                            " onclick="document.__vueApp__.removePoint(${this.points.length})">
+                                ×
+                            </span>
+                        </div>
+                    `, { offset: new BMapGL.Size(15, -25) });
+                    
+                    marker.setLabel(label);
+                    this.map.addOverlay(marker);
+                    
+                    this.points.push({ lng, lat });
+                    this.markers.push(marker);
+                    this.calculateRecommendation();
+                },
+
+                removePoint(index) {
+                    if (index >= 0 && index < this.markers.length) {
+                        this.map.removeOverlay(this.markers[index]);
+                        this.points.splice(index, 1);
+                        this.markers.splice(index, 1);
+                        this.clearHelpers();
+                        this.calculateRecommendation();
+                    }
+                },
+
+                clearAll() {
+                    this.markers.forEach(marker => this.map.removeOverlay(marker));
+                    this.points = [];
+                    this.markers = [];
+                    this.recommendation = null;
+                    this.avgDistance = null;
+                    this.clearHelpers();
+                },
+
+                calculateRecommendation() {
+                    if (this.points.length < 2) {
+                        this.recommendation = null;
+                        return;
+                    }
+
+                    const centroid = this.points.reduce((acc, point) => {
+                        return {
+                            lng: acc.lng + point.lng,
+                            lat: acc.lat + point.lat
+                        };
+                    }, { lng: 0, lat: 0 });
+
+                    centroid.lng /= this.points.length;
+                    centroid.lat /= this.points.length;
+
+                    const gridSize = 0.01;
+                    const steps = 5;
+                    let bestPoint = centroid;
+                    let minTotalDistance = Infinity;
+
+                    for (let i = -steps; i <= steps; i++) {
+                        for (let j = -steps; j <= steps; j++) {
+                            const testPoint = {
+                                lng: centroid.lng + (i * gridSize / steps),
+                                lat: centroid.lat + (j * gridSize / steps)
+                            };
+
+                            const totalDistance = this.points.reduce((sum, point) => {
+                                return sum + this.getDistance(point, testPoint);
+                            }, 0);
+
+                            if (totalDistance < minTotalDistance) {
+                                minTotalDistance = totalDistance;
+                                bestPoint = testPoint;
+                            }
+                        }
+                    }
+
+                    this.recommendation = bestPoint;
+                    this.avgDistance = minTotalDistance / this.points.length;
+                    this.updateRecommendationMarker();
+                    this.drawDistanceHelpers();
+                },
+
+                drawDistanceHelpers() {
+                    this.clearHelpers();
+                    
+                    if (!this.recommendation) return;
+
+                    this.points.forEach(point => {
+                        // 绘制连接线
+                        const line = new BMapGL.Polyline([
+                            new BMapGL.Point(point.lng, point.lat),
+                            new BMapGL.Point(this.recommendation.lng, this.recommendation.lat)
+                        ], {
+                            strokeColor: "#FF9800",
+                            strokeWeight: 2,
+                            strokeOpacity: 0.7,
+                            strokeStyle: "dashed"
+                        });
+                        this.map.addOverlay(line);
+                        
+                        // 添加距离标签
+                        const midPoint = this.getMidPoint(point, this.recommendation);
+                        const distance = this.getDistance(point, this.recommendation);
+                        const label = new BMapGL.Label(`
+                            <div class="distance-label">
+                                ${distance.toFixed(0)}米
+                            </div>
+                        `, {
+                            position: new BMapGL.Point(midPoint.lng, midPoint.lat),
+                            offset: new BMapGL.Size(-20, -10)
+                        });
+                        this.map.addOverlay(label);
+
+                        this.distanceHelpers.push({ line, label });
+                    });
+                },
+
+                clearHelpers() {
+                    this.distanceHelpers.forEach(({ line, label }) => {
+                        this.map.removeOverlay(line);
+                        this.map.removeOverlay(label);
+                    });
+                    this.distanceHelpers = [];
+                },
+
+                getMidPoint(p1, p2) {
+                    return {
+                        lng: (p1.lng + p2.lng) / 2,
+                        lat: (p1.lat + p2.lat) / 2
+                    }
+                },
+
+                updateRecommendationMarker() {
+                    this.map.removeOverlay(this.recommendationMarker);
+                    
+                    if (this.recommendation) {
+                        const point = new BMapGL.Point(
+                            this.recommendation.lng, 
+                            this.recommendation.lat
+                        );
+                        
+                        this.recommendationMarker = new BMapGL.Marker(point, {
+                            icon: new BMapGL.Icon(`
+                                <div style="
+                                    background: #4CAF50;
+                                    color: white;
+                                    width: 30px;
+                                    height: 30px;
+                                    border-radius: 50%;
+                                    display: flex;
+                                    align-items: center;
+                                    justify-content: center;
+                                    font-weight: bold;
+                                    box-shadow: 0 2px 5px rgba(0,0,0,0.3);
+                                ">
+                                    ★
+                                </div>
+                            `, new BMapGL.Size(30, 30))
+                        });
+                        
+                        this.map.addOverlay(this.recommendationMarker);
+                    }
+                },
+
+                centerOnRecommendation() {
+                    if (this.recommendation) {
+                        this.map.centerAndZoom(
+                            new BMapGL.Point(
+                                this.recommendation.lng,
+                                this.recommendation.lat
+                            ), 
+                            15
+                        );
+                    }
+                },
+
+                getDistance(point1, point2) {
+                    const R = 6371e3;
+                    const phi1 = point1.lat * Math.PI / 180;
+                    const phi2 = point2.lat * Math.PI / 180;
+                    const deltaPhi = (point2.lat - point1.lat) * Math.PI / 180;
+                    const deltaLambda = (point2.lng - point1.lng) * Math.PI / 180;
+
+                    const a = Math.pow(Math.sin(deltaPhi / 2), 2) +
+                              Math.cos(phi1) * Math.cos(phi2) *
+                              Math.pow(Math.sin(deltaLambda / 2), 2);
+                    
+                    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+                }
+            }
+        }).mount('#app');
+
+        document.__vueApp__ = app;
+    </script>
+</body>
+</html>
